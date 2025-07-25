@@ -6,7 +6,7 @@ from configs.logger import logger
 from utils.pose_estimate import load_network
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Pose Estimation Pipeline')
+    parser = argparse.ArgumentParser(description='OpenPose Pose Estimation')
     parser.add_argument('--bg', default="./dataset/UR/img/bg",
                         help='Path to image or video. Skip to capture frames from camera')
     parser.add_argument('--net', default="openpose", choices=["openpose"],

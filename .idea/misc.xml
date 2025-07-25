@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="tf" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="face_id_py38" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="pytorch" project-jdk-type="Python SDK" />
 </project>

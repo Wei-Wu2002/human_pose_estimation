@@ -9,14 +9,15 @@ import torch.optim as optim
 from configs.logger import logger
 from dataset.dataloader import get_dataloaders
 from src.GRU import GRU
+from utils.model_evaluate import evaluate_model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Handcrafted feature loading test")
     parser.add_argument('--csv_path', type=str, default='dataset/YouTube/processed/extracted_labels_Youtube.csv',
                         help='Path to CSV file containing npy paths and labels')
-    parser.add_argument('--lr', type=float, default=1e-3,
+    parser.add_argument('--lr', type=float, default=0.0005,
                         help='Learning rate for the optimizer')
-    parser.add_argument('--num_epochs', type=int, default=500,
+    parser.add_argument('--num_epochs', type=int, default=300,
                         help='Number of training epochs')
     args = parser.parse_args()
 
@@ -55,7 +56,7 @@ if __name__ == '__main__':
                 use_sigmoid=True).to(device)
 
     criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
 
     # ==== 训练循环 ====
     for epoch in range(args.num_epochs):
@@ -80,20 +81,15 @@ if __name__ == '__main__':
 
         train_acc = 100 * correct / total
         avg_loss = running_loss / total
-        logger.info(f"[Epoch {epoch + 1}] Loss: {avg_loss:.4f} | Accuracy: {train_acc:.2f}%")
+        logger.info(f"[Epoch {epoch + 1}] Loss: {avg_loss:.4f} | Accuracy: {train_acc:.4f}%")
 
     # ==== 测试评估 ====
-    model.eval()
-    correct = total = 0
-    with torch.no_grad():
-        for x_batch, y_batch in test_loader:
-            x_batch = x_batch.to(device).float()
-            y_batch = y_batch.to(device).float().unsqueeze(1)
+    results = evaluate_model(model, test_loader, device)
 
-            outputs = model(x_batch)
-            preds = (outputs > 0.5).float()
-            correct += (preds == y_batch).sum().item()
-            total += y_batch.size(0)
-
-    test_acc = 100 * correct / total
-    logger.info(f"Test Accuracy: {test_acc:.2f}%")
+    logger.info("==== Test Evaluation Results ====")
+    logger.info(f"Confusion Matrix:")
+    logger.info(f"  TP: {results['tp']}, TN: {results['tn']}, FP: {results['fp']}, FN: {results['fn']}")
+    logger.info(f"Precision : {results['precision']:.4f}")
+    logger.info(f"Recall    : {results['recall']:.4f}")
+    logger.info(f"F1 Score  : {results['f1_score']:.4f}")
+    logger.info(f"Accuracy  : {results['accuracy'] * 100:.2f}%")

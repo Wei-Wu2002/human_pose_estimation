@@ -8,7 +8,7 @@ import torch.optim as optim
 
 from configs.logger import logger
 from dataset.dataloader import get_dataloaders
-from src.GRU import GRU
+from src.BiLSTM import BiLSTM
 from utils.model_evaluate import evaluate_model
 
 if __name__ == '__main__':
@@ -48,12 +48,14 @@ if __name__ == '__main__':
     # logger.info(f"Train label classes: {sorted(set(train_labels))}, total samples: {len(train_labels)}")
     # logger.info(f"Test label classes: {sorted(set(test_labels))}, total samples: {len(test_labels)}")
 
-    model = GRU(input_size=34,
-                hidden_size=128,
-                num_layers=3,
-                output_size=1,
-                dropout=0.6,
-                use_sigmoid=True).to(device)
+    model = BiLSTM(
+        input_size=34,
+        hidden_size=64,
+        num_layers=2,
+        output_size=1,
+        dropout=0.5,
+        use_sigmoid=True
+    ).to(device)
 
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)

@@ -19,13 +19,15 @@ if __name__ == '__main__':
                         help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500,
                         help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=32,
+                        help='Batch size for training and testing')
     args = parser.parse_args()
 
     csv_path = Path(args.csv_path)
     start = time.time()
 
     logger.info(f"Loading dataset from: {csv_path}")
-    train_loader, test_loader = get_dataloaders(csv_path=csv_path, mode='train', batch_size=32, shuffle=True,
+    train_loader, test_loader = get_dataloaders(csv_path=csv_path, mode='train', batch_size=args.batch_size, shuffle=True,
                                                 test_ratio=0.2)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -48,15 +50,39 @@ if __name__ == '__main__':
     # logger.info(f"Train label classes: {sorted(set(train_labels))}, total samples: {len(train_labels)}")
     # logger.info(f"Test label classes: {sorted(set(test_labels))}, total samples: {len(test_labels)}")
 
-    model = LSTM(input_size=34,
-                 hidden_size=128,
-                 num_layers=3,
-                 output_size=1,
-                 dropout=0.6,
-                 use_sigmoid=True).to(device)
+    input_size = 34
+    hidden_size = 128
+    num_layers = 3
+    output_size = 1
+    dropout = 0.6
+    use_sigmoid = True
+    weight_decay = 1e-6
 
+    model = LSTM(input_size=input_size,
+                 hidden_size=hidden_size,
+                 num_layers=num_layers,
+                 output_size=output_size,
+                 dropout=dropout,
+                 use_sigmoid=use_sigmoid).to(device)
     criterion = nn.BCELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=weight_decay)
+
+    # ==== 打印模型和超参数配置 ====
+    logger.info("==== LSTM Model Configuration ====")
+    logger.info(f"Input size   : {input_size}")
+    logger.info(f"Hidden size  : {hidden_size}")
+    logger.info(f"Num layers   : {num_layers}")
+    logger.info(f"Dropout      : {dropout}")
+    logger.info(f"Use Sigmoid  : {use_sigmoid}")
+    logger.info(f"Output size  : {output_size}")
+
+    logger.info("==== Training Hyperparameters ====")
+    logger.info(f"Learning rate: {args.lr}")
+    logger.info(f"Optimizer    : AdamW")
+    logger.info(f"Weight decay : {weight_decay}")
+    logger.info(f"Loss function: BCELoss")
+    logger.info(f"Num epochs   : {args.num_epochs}")
+    logger.info(f"Batch size   : {args.batch_size}")
 
     # ==== 训练循环 ====
     for epoch in range(args.num_epochs):

@@ -8,7 +8,7 @@ import torch.optim as optim
 
 from configs.logger import logger
 from dataset.dataloader import get_dataloaders
-from src.GRU import GRU
+from src.LSTM_SE import LSTM
 from utils.model_evaluate import evaluate_model
 
 if __name__ == '__main__':
@@ -58,13 +58,12 @@ if __name__ == '__main__':
     use_sigmoid = True
     weight_decay = 1e-6
 
-    model = GRU(input_size=input_size,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                output_size=output_size,
-                dropout=dropout,
-                use_sigmoid=use_sigmoid).to(device)
-
+    model = LSTM(input_size=input_size,
+                 hidden_size=hidden_size,
+                 num_layers=num_layers,
+                 output_size=output_size,
+                 dropout=dropout,
+                 use_sigmoid=use_sigmoid).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=weight_decay)
 

@@ -11,6 +11,32 @@ from dataset.dataloader import get_dataloaders
 from src.LSTM import LSTM
 from utils.model_evaluate import evaluate_model
 
+def joint_loss(clip_out, frame_outs, target, alpha=0.7, threshold=0.5):
+    """
+    计算 clip-level 和 frame-level 联合 BCE 损失
+    Args:
+        clip_out: (B, 1) 片段级输出
+        frame_outs: (B, T, 1) 帧级输出
+        target: (B, 1) clip-level 标签（0或1）
+        alpha: 权重，越大越重视 clip-level loss
+        threshold: 用于 binary 分割（非必需，这里不应用）
+
+    Returns:
+        loss: 加权后的总损失
+    """
+    bce = nn.BCELoss()
+
+    # Clip-level loss
+    clip_loss = bce(clip_out, target)
+
+    # Frame-level loss：broadcast target → (B, T, 1)
+    target_frame = target.unsqueeze(1).repeat(1, frame_outs.shape[1], 1)
+    frame_loss = bce(frame_outs, target_frame)
+
+    # Total loss
+    loss = alpha * clip_loss + (1 - alpha) * frame_loss
+    return loss
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Handcrafted feature loading test")
     parser.add_argument('--csv_path', type=str, default='dataset/YouTube/processed/extracted_labels_Youtube.csv',
@@ -57,6 +83,7 @@ if __name__ == '__main__':
     dropout = 0.6
     use_sigmoid = True
     weight_decay = 1e-6
+    alpha = 0.8
 
     model = LSTM(input_size=input_size,
                  hidden_size=hidden_size,
@@ -95,13 +122,13 @@ if __name__ == '__main__':
             y_batch = y_batch.to(device).float().unsqueeze(1)  # (B, 1)
 
             optimizer.zero_grad()
-            outputs = model(x_batch)  # (B, 1)
-            loss = criterion(outputs, y_batch)
+            clip_out, frame_outs = model(x_batch)
+            loss = joint_loss(clip_out, frame_outs, y_batch, alpha=alpha)
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item() * x_batch.size(0)
-            preds = (outputs > 0.5).float()  # 概率转标签
+            preds = (clip_out > 0.5).float()  # 概率转标签
             correct += (preds == y_batch).sum().item()
             total += y_batch.size(0)
 

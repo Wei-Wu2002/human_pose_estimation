@@ -8,14 +8,12 @@ from ultralytics import YOLO
 
 from configs.config import YOLO_MODEL_DIR, YouTube_DIR
 from configs.logger import logger
-from utils.video_to_keypoints import extract_keypoints_from_video, normalize_keypoints_sequence
+from utils.video_to_keypoints import extract_keypoints_from_video_with_conf, normalize_keypoints_sequence_with_conf
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Keypoint extraction from video datasets")
     parser.add_argument('--name', type=str, choices=['Youtube'], required=True,
                         help='Dataset name: Youtube or UR')
-    parser.add_argument('--conf', type=str, choices=['xy', 'xyc'], default='xy',
-                        help='Output format: "xy" for (x,y) only; "xyc" for (x,y,conf).')
     args = parser.parse_args()
 
     if args.name == 'Youtube':
@@ -34,7 +32,7 @@ if __name__ == '__main__':
     keypoints_sequences = []
     labels = []
     csv_records = []
-    save_root = Path(YouTube_DIR) / 'processed'
+    save_root = Path(YouTube_DIR) / 'processed_with_conf'
 
     model = YOLO(YOLO_MODEL_DIR, task='pose')
     for folder_path, label in video_folders.items():
@@ -52,8 +50,9 @@ if __name__ == '__main__':
 
         for video_idx, video_path in enumerate(tqdm(video_files, desc=f"Processing {dataset_name}")):
             try:
-                keypoints = extract_keypoints_from_video(str(video_path), model, sequence_length=sequence_length)
-                keypoints = normalize_keypoints_sequence(keypoints)
+                keypoints = extract_keypoints_from_video_with_conf(str(video_path), model, sequence_length=sequence_length)
+                print(f'keypoints shape: {keypoints.shape}')
+                keypoints = normalize_keypoints_sequence_with_conf(keypoints)
                 keypoints_sequences.append(keypoints)
                 labels.append(label)
 

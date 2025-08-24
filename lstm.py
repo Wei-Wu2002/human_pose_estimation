@@ -146,3 +146,18 @@ if __name__ == '__main__':
     logger.info(f"Recall    : {results['recall']:.4f}")
     logger.info(f"F1 Score  : {results['f1_score']:.4f}")
     logger.info(f"Accuracy  : {results['accuracy'] * 100:.2f}%")
+
+    # ==== 保存模型 ====
+    save_dir = Path(r"F:\IC\fall_detection_code\work_space\temp\lstm")
+    save_dir.mkdir(parents=True, exist_ok=True)  # 如果路径不存在则创建
+
+    model_path = save_dir / f"lstm_epoch{args.num_epochs}_{results['accuracy'] * 100:.2f}.pth"
+    torch.save({
+        "epoch": args.num_epochs,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": avg_loss,
+    }, model_path)
+
+    logger.info(f"Model saved to {model_path}")
+

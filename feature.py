@@ -171,7 +171,7 @@ if __name__ == '__main__':
     gt0_names = []
 
     for (i, x) in enumerate(X):
-        outputs = detect_fall_sliding(x, window_size=10)
+        outputs = detect_fall_sliding(x, window_size=8)
         print(f"Sample {i} outputs: {outputs}, Ground truth: {y[i]}")
         if y[i] == 1:
             gt1_outputs.append(outputs)

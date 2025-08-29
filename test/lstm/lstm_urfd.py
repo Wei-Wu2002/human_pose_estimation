@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 import argparse
 import ast
+import os
 import time
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import DataLoader, Dataset
 
 from configs.logger import logger
@@ -220,12 +224,6 @@ def evaluate_model_frame_level_sliding(
     return result_dict
 
 
-import numpy as np
-import torch
-import os
-import matplotlib.pyplot as plt
-
-
 def compute_ttd_single(gt: np.ndarray, pred: np.ndarray):
     """计算单个序列的 TTD"""
     if np.sum(gt) == 0:
@@ -238,11 +236,6 @@ def compute_ttd_single(gt: np.ndarray, pred: np.ndarray):
         return np.inf  # 没检测到
     pred_start = pred_pos[0]
     return gt_start - pred_start  # 正值表示提前检测
-
-
-import matplotlib.pyplot as plt
-import numpy as np
-import os
 
 
 def plot_ttd_distribution(ttd_results, save_path="ttd_hist.png", title="TTD Distribution"):
@@ -356,6 +349,209 @@ def visualize_frame_level_predictions(
     return ttd_results
 
 
+def evaluate_event_level_from_model(
+        model,
+        X,
+        y,
+        names,
+        device,
+        window_size=20,
+        stride=1,
+        score_threshold=0.5,
+        tiou_threshold=0.5,
+        min_event_len=1,
+        merge_gap=0,
+        save_framewise_csv=None,  # 可选：保存每个视频的帧级分数与预测
+):
+    """
+    基于滑窗推理的事件级评估（tIoU 一对一匹配）。
+    关键点：只在“有预测的帧区间”内进行事件抽取和匹配，自动裁剪 GT 与预测的对齐范围。
+
+    Args:
+        model, X, y, names, device: 与你现有代码一致
+        window_size, stride        : 滑窗参数
+        score_threshold            : 帧级分数二值化阈值
+        tiou_threshold             : 事件匹配的 tIoU 阈值（如 0.5）
+        min_event_len              : 过滤过短事件（帧数），默认 1
+        merge_gap                  : 合并近邻事件的最大间隙（帧），默认 0 不合并
+        save_framewise_csv         : 可选路径，若提供将保存每个视频逐帧的 score/pred/gt（仅有效区间）
+
+    Returns:
+        metrics: dict（全局微平均 Precision/Recall/F1/TP/FP/FN/mean_matched_tIoU 等）
+        details: list[dict]（逐视频的事件段、匹配结果等）
+    """
+
+    model.eval()
+
+    # ===== 工具函数：二值序列 -> 事件段；tIoU；贪心匹配 =====
+    def _segments_from_binary(arr, min_len=1, merge_gap=0):
+        arr = np.asarray(arr).astype(int)
+        T = len(arr)
+        segs = []
+        in_seg = False
+        start = -1
+        for i in range(T):
+            if arr[i] == 1 and not in_seg:
+                in_seg = True
+                start = i
+            if arr[i] == 0 and in_seg:
+                segs.append((start, i - 1))
+                in_seg = False
+        if in_seg:
+            segs.append((start, T - 1))
+        # 过滤短段
+        segs = [(s, e) for (s, e) in segs if (e - s + 1) >= min_len]
+        # 合并近邻
+        if merge_gap > 0 and len(segs) > 1:
+            merged = [segs[0]]
+            for (s, e) in segs[1:]:
+                ps, pe = merged[-1]
+                if s - pe - 1 <= merge_gap:
+                    merged[-1] = (ps, max(pe, e))
+                else:
+                    merged.append((s, e))
+            segs = merged
+        return segs
+
+    def _tiou(a, b):
+        (s1, e1), (s2, e2) = a, b
+        inter = max(0, min(e1, e2) - max(s1, s2) + 1)
+        if inter == 0:
+            return 0.0
+        union = (e1 - s1 + 1) + (e2 - s2 + 1) - inter
+        return inter / union
+
+    def _greedy_match(gt_segs, pr_segs, thr):
+        if len(gt_segs) == 0 or len(pr_segs) == 0:
+            return [], set(range(len(gt_segs))), set(range(len(pr_segs)))
+        tiou_mat = np.zeros((len(gt_segs), len(pr_segs)), dtype=float)
+        for i, g in enumerate(gt_segs):
+            for j, p in enumerate(pr_segs):
+                tiou_mat[i, j] = _tiou(g, p)
+
+        matches = []
+        used_gt, used_pr = set(), set()
+        candidates = [(tiou_mat[i, j], i, j) for i in range(len(gt_segs)) for j in range(len(pr_segs))]
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        for t, i, j in candidates:
+            if t < thr:
+                break
+            if i in used_gt or j in used_pr:
+                continue
+            matches.append((i, j, float(t)))
+            used_gt.add(i)
+            used_pr.add(j)
+        unmatched_gt = set(range(len(gt_segs))) - used_gt
+        unmatched_pr = set(range(len(pr_segs))) - used_pr
+        return matches, unmatched_gt, unmatched_pr
+
+    # ===== 汇总容器 =====
+    all_gt_valid = []
+    all_pred_valid = []
+    all_names = []
+    per_seq_scores = []  # 可选：保存有效区间的 scores
+    per_seq_threshold = score_threshold
+
+    # ===== 逐视频滑窗推理，聚合到帧级 =====
+    for seq_x, seq_y, name in zip(X, y, names):
+        T = len(seq_x)
+        frame_scores = np.zeros(T, dtype=float)
+        frame_counts = np.zeros(T, dtype=float)
+
+        with torch.no_grad():
+            for t in range(window_size, T + 1, stride):
+                x_clip = seq_x[t - window_size:t]  # (W, D)
+                x_tensor = torch.tensor(x_clip, dtype=torch.float32).unsqueeze(0).to(device)
+                clip_out, _ = model(x_tensor)  # (1, 1)
+                clip_score = float(clip_out.item())
+                frame_idx = t - 1  # 仅累加窗口末帧
+                frame_scores[frame_idx] += clip_score
+                frame_counts[frame_idx] += 1.0
+
+        # 仅保留被至少1个窗口覆盖的帧
+        valid_mask = frame_counts > 0
+        if not np.any(valid_mask):
+            # 没有有效帧，跳过该视频
+            continue
+
+        # 有效帧的分数均值
+        avg_scores = np.zeros_like(frame_scores)
+        avg_scores[valid_mask] = frame_scores[valid_mask] / np.clip(frame_counts[valid_mask], 1e-8, None)
+
+        # 有效区间的索引范围（理论上是 [window_size-1, T-1]，但加一层保险）
+        valid_indices = np.where(valid_mask)[0]
+        v_start, v_end = valid_indices[0], valid_indices[-1]
+
+        # 裁剪到有效区间
+        gt_valid = np.asarray(seq_y, dtype=int)[v_start: v_end + 1]
+        scores_valid = avg_scores[v_start: v_end + 1]
+        pred_valid = (scores_valid > score_threshold).astype(int)
+
+        # 保存
+        all_gt_valid.append(gt_valid)
+        all_pred_valid.append(pred_valid)
+        all_names.append(name)
+        per_seq_scores.append(scores_valid)
+
+    # ===== 事件级匹配（微平均） =====
+    total_TP = total_FP = total_FN = 0
+    matched_tious = []
+    details = []
+
+    for name, gt_arr, pr_arr in zip(all_names, all_gt_valid, all_pred_valid):
+        gt_segs = _segments_from_binary(gt_arr, min_len=min_event_len, merge_gap=merge_gap)
+        pr_segs = _segments_from_binary(pr_arr, min_len=min_event_len, merge_gap=merge_gap)
+        matches, un_gt, un_pr = _greedy_match(gt_segs, pr_segs, tiou_threshold)
+
+        TP, FP, FN = len(matches), len(un_pr), len(un_gt)
+        total_TP += TP
+        total_FP += FP
+        total_FN += FN
+        matched_tious.extend([m[2] for m in matches])
+
+        details.append({
+            "name": name,
+            "gt_events": gt_segs,
+            "pred_events": pr_segs,
+            "TP": TP, "FP": FP, "FN": FN,
+            "matches": matches,  # (gt_idx, pred_idx, tIoU)
+        })
+
+    precision = total_TP / (total_TP + total_FP) if (total_TP + total_FP) > 0 else 0.0
+    recall = total_TP / (total_TP + total_FN) if (total_TP + total_FN) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    mean_tiou = float(np.mean(matched_tious)) if len(matched_tious) > 0 else 0.0
+
+    metrics = {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tp": total_TP,
+        "fp": total_FP,
+        "fn": total_FN,
+        "support_events": total_TP + total_FN,
+        "mean_matched_tIoU": mean_tiou,
+        "tiou_threshold": tiou_threshold,
+        "score_threshold": score_threshold,
+        "min_event_len": min_event_len,
+        "merge_gap": merge_gap,
+        "window_size": window_size,
+        "stride": stride,
+    }
+
+    # 可选保存逐视频帧级结果（仅有效区间）
+    if save_framewise_csv:
+        rows = []
+        for name, gt_arr, score_arr in zip(all_names, all_gt_valid, per_seq_scores):
+            pred_arr = (score_arr > score_threshold).astype(int)
+            for i, (g, s, p) in enumerate(zip(gt_arr, score_arr, pred_arr)):
+                rows.append({"video": name, "frame_idx_valid": i, "gt": int(g), "score": float(s), "pred": int(p)})
+        pd.DataFrame(rows).to_csv(save_framewise_csv, index=False)
+        print(f"[✓] Saved framewise valid results to: {save_framewise_csv}")
+
+    return metrics, details
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate LSTM on sliding window clips (frame-level labels).")
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to .pth model checkpoint')
@@ -443,6 +639,30 @@ def main():
         logger.info(f"  Max: {np.min(valid_ttds):.2f} 帧")
     else:
         logger.info("[!] 没有可用于统计的 TTD 值（全部为无事件或未预测）")
+
+    # ====== 事件级（event-level）评估：tIoU 匹配 ======
+    event_metrics, event_details = evaluate_event_level_from_model(
+        model=model,
+        X=X,
+        y=y,
+        names=names,
+        device=device,
+        window_size=args.window_size,
+        stride=args.stride,
+        score_threshold=0.5,  # 与你可视化时用的阈值一致
+        tiou_threshold=0.5,  # 常用 0.5，可按需要改 0.3/0.7 等
+        min_event_len=3,  # 过滤毛刺，按帧率设定（如 30fps 可设 3~5）
+        merge_gap=2,  # 合并近邻段的小间隙，可按需要调
+        save_framewise_csv="framewise_valid_scores.csv"  # 可选
+    )
+
+    logger.info("\n[✓] Event-level (tIoU) metrics:")
+    logger.info(f"  Precision: {event_metrics['precision']:.4f}")
+    logger.info(f"  Recall   : {event_metrics['recall']:.4f}")
+    logger.info(f"  F1       : {event_metrics['f1']:.4f}")
+    logger.info(f"  Mean tIoU (matched): {event_metrics['mean_matched_tIoU']:.4f}")
+    logger.info(
+        f"  TP={event_metrics['tp']}, FP={event_metrics['fp']}, FN={event_metrics['fn']}, Support={event_metrics['support_events']}")
 
 
 if __name__ == '__main__':
